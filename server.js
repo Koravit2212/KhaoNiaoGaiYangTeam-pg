@@ -14,7 +14,7 @@ const h=f=>(req,res)=>f(req,res).catch(e=>{console.error(e);res.status(['23505',
 const auth=(...r)=>(req,res,next)=>{try{req.u=jwt.verify((req.headers.authorization||'').slice(7)||req.query.t,S)}catch{return res.status(401).json({error:'กรุณาเข้าสู่ระบบใหม่'})}
  if(r.length&&!r.includes(req.u.role))return res.status(403).json({error:'ไม่มีสิทธิ์เข้าถึงข้อมูลนี้'});next()};
 const okMonth=m=>/^\d{4}-(0[1-9]|1[0-2])$/.test(m||''),span=m=>{const[y,mo]=m.split('-').map(Number);return[m+'-01',m+'-'+P2(new Date(y,mo,0).getDate())]};
-const EMP=`SELECT e.employee_id,e.first_name,e.last_name,e.email,e.phone,e.address,e.hire_date,e.day_off,e.employment_status,e.department_id,e.position_id,d.department_name,p.position_name,e.manager_id,m.first_name||' '||m.last_name manager_name FROM employees e LEFT JOIN employees m ON m.employee_id=e.manager_id JOIN departments d ON d.department_id=e.department_id JOIN positions p ON p.position_id=e.position_id`;
+const EMP=`SELECT e.employee_id,e.first_name,e.last_name,e.email,e.phone,e.address,e.hire_date,e.day_off,e.employment_status,e.department_id,e.position_id,d.department_name,p.position_name,e.manager_id,m.first_name||' '||m.last_name manager_name,a.role FROM employees e LEFT JOIN employees m ON m.employee_id=e.manager_id LEFT JOIN accounts a ON a.account_id=e.account_id JOIN departments d ON d.department_id=e.department_id JOIN positions p ON p.position_id=e.position_id`;
 
 app.post('/api/login',h(async(req,res)=>{
  const{username,password}=req.body,[a]=await q('SELECT * FROM accounts WHERE username=:u',{u:username||''});
@@ -70,17 +70,24 @@ app.post('/api/employees/:id/resign',auth(...HR),h(async(req,res)=>{
 app.get('/api/resignations',auth(...HR),h(async(_,res)=>res.json(await q("SELECT r.resignation_id,e.first_name||' '||e.last_name emp,r.reason,r.request_date,r.effective_date,r.status FROM resignations r JOIN employees e ON e.employee_id=r.employee_id ORDER BY 1 DESC"))));
 
 const reqs=async()=>{const dn=Object.fromEntries((await q('SELECT department_id,department_name FROM departments')).map(x=>[x.department_id,x.department_name])),pn=Object.fromEntries((await q('SELECT position_id,position_name FROM positions')).map(x=>[x.position_id,x.position_name]));
- return(await q("SELECT r.report_id,r.employee_id,r.created_date,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_type='change_request' ORDER BY r.report_id DESC")).map(r=>{const j=JSON.parse(r.data);return{request_id:r.report_id,employee_id:r.employee_id,emp:r.emp,created_date:r.created_date,status:j.status,reason:j.reason,decision_reason:j.decision_reason,old_dept:dn[j.old_department_id],old_pos:pn[j.old_position_id],new_dept:dn[j.new_department_id],new_pos:pn[j.new_position_id],_j:j}})};
+ return(await q("SELECT r.report_id,r.employee_id,r.created_date,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_type='change_request' ORDER BY r.report_id DESC")).map(r=>{const j=JSON.parse(r.data);return{request_id:r.report_id,employee_id:r.employee_id,emp:r.emp,created_date:r.created_date,status:j.status,reason:j.reason,decision_reason:j.decision_reason,old_dept:dn[j.old_department_id],old_pos:pn[j.old_position_id],new_dept:dn[j.new_department_id],new_pos:pn[j.new_position_id],old_role:j.old_role,new_role:j.new_role,_j:j}})};
 app.get('/api/requests',auth(...HR,'manager'),h(async(_,res)=>res.json((await reqs()).map(({_j,...r})=>r))));
-app.post('/api/requests',auth(...HR),h(async(req,res)=>{const b=req.body,[e]=await q('SELECT department_id,position_id FROM employees WHERE employee_id=:i',{i:b.employee_id});
+app.post('/api/requests',auth(...HR),h(async(req,res)=>{const b=req.body,[e]=await q('SELECT e.department_id,e.position_id,a.role FROM employees e LEFT JOIN accounts a ON a.account_id=e.account_id WHERE e.employee_id=:i',{i:b.employee_id});
  if(!e)return res.sendStatus(404);
- await run("INSERT INTO reports(employee_id,report_type,data) VALUES(:i,'change_request',:d)",{i:b.employee_id,d:JSON.stringify({status:'pending',reason:b.reason||null,old_department_id:e.department_id,old_position_id:e.position_id,new_department_id:+b.department_id,new_position_id:+b.position_id})});res.json({ok:1})}));
+ const nd=+b.department_id||e.department_id,np=+b.position_id||e.position_id,nr=b.role&&b.role!==e.role?b.role:null;
+ if(nr){if(!['employee','hr','manager'].includes(nr))return res.status(400).json({error:'สิทธิ์ที่เลือกไม่ถูกต้อง'});if(!e.role||e.role==='admin')return res.status(400).json({error:'ไม่สามารถเปลี่ยนสิทธิ์ของบัญชีนี้ได้'})}
+ if(nd===e.department_id&&np===e.position_id&&!nr)return res.status(400).json({error:'ไม่มีการเปลี่ยนแปลง กรุณาเลือกแผนก ตำแหน่ง หรือสิทธิ์ใหม่อย่างน้อย 1 อย่าง'});
+ await run("INSERT INTO reports(employee_id,report_type,data) VALUES(:i,'change_request',:d)",{i:b.employee_id,d:JSON.stringify({status:'pending',reason:b.reason||null,old_department_id:e.department_id,old_position_id:e.position_id,new_department_id:nd,new_position_id:np,...(nr?{old_role:e.role,new_role:nr}:{})})});res.json({ok:1})}));
 app.post('/api/requests/:id/decide',auth('manager'),h(async(req,res)=>{
  const{approve,reason}=req.body,r=(await reqs()).find(x=>x.request_id==req.params.id&&x.status==='pending');
  if(!r)return res.status(404).json({error:'ไม่พบคำขอที่รออนุมัติ'});if(!approve&&!reason)return res.status(400).json({error:'กรุณาระบุเหตุผลที่ไม่อนุมัติ'});
+  if(approve&&r.new_role){const[a]=await q('SELECT a.role FROM employees e JOIN accounts a ON a.account_id=e.account_id WHERE e.employee_id=:e',{e:r.employee_id});
+   if(!a||a.role==='admin')return res.status(400).json({error:'ไม่สามารถเปลี่ยนสิทธิ์ของบัญชีนี้ได้'});
+   if(a.role==='manager'&&r.new_role!=='manager'&&(await q("SELECT COUNT(*) n FROM accounts a JOIN employees e ON e.account_id=a.account_id WHERE a.role='manager' AND a.status='active' AND e.employment_status<>'resigned'"))[0].n<2)return res.status(400).json({error:'ไม่สามารถลดสิทธิ์ผู้บริหารคนสุดท้ายของระบบได้'})}
  const j={...r._j,status:approve?'approved':'rejected',decision_reason:reason||null,decided_date:new Date().toISOString().slice(0,10)};
  await run('UPDATE reports SET data=:d WHERE report_id=:i',{d:JSON.stringify(j),i:r.request_id});
- if(approve)await run('UPDATE employees SET department_id=:d,position_id=:p WHERE employee_id=:e',{d:j.new_department_id,p:j.new_position_id,e:r.employee_id});res.json({ok:1})}));
+ if(approve){await run('UPDATE employees SET department_id=:d,position_id=:p WHERE employee_id=:e',{d:j.new_department_id,p:j.new_position_id,e:r.employee_id});
+  if(r.new_role)await run('UPDATE accounts SET role=:r WHERE account_id=(SELECT account_id FROM employees WHERE employee_id=:e)',{r:r.new_role,e:r.employee_id})}res.json({ok:1})}));
 
 const TYP=['absent','leave','late','ot'],ATQ="SELECT r.report_id record_id,r.created_date::date work_date,r.report_type record_type,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_type IN ('absent','leave','late','ot')";
 app.get('/api/attendance',auth(...HR),h(async(req,res)=>res.json((await q(ATQ+" AND r.created_date::date=CAST(:d AS date) ORDER BY r.report_id DESC",{d:req.query.date})).map(att))));
