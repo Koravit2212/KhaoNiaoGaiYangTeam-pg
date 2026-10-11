@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express=require('express'),{Pool,types}=require('pg'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken');
 types.setTypeParser(20,Number);types.setTypeParser(1700,Number);types.setTypeParser(1082,v=>v);
+const fs=require('fs'),path=require('path');
 const app=express(),S=process.env.JWT_SECRET||'change-me',HR=['hr','admin'],DEF='Passw0rd!',fails=new Map();
 app.use(express.json({limit:'1mb'}));app.use(express.static('public'));
 let pool;const getPool=()=>pool||(pool=new Pool({connectionString:process.env.DATABASE_URL,max:3}).on('error',e=>console.error('pg pool:',e.message)));
@@ -30,6 +31,9 @@ app.post('/api/login',h(async(req,res)=>{
 app.get('/api/lookups',auth(),h(async(_,res)=>res.json({departments:await q('SELECT department_id,department_name FROM departments ORDER BY 2'),positions:await q('SELECT position_id,position_name FROM positions ORDER BY 2')})));
 app.get('/api/me',auth(),h(async(req,res)=>res.json((await q(EMP+' WHERE e.employee_id=:i',{i:req.u.eid||0}))[0]||null)));
 
+app.get('/api/manual',auth(),h(async(req,res)=>{
+ const role=HR.includes(req.u.role)?'hr':req.u.role,html=fs.readFileSync(path.join(__dirname,'docs','manual.html'),'utf8');
+ res.type('html').send(html.replace(/<section data-roles="([^"]*)">([\s\S]*?)<\/section>/g,(_,r,c)=>r.split(',').includes(role)?c:''))}));
 app.post('/api/change-password',auth(),h(async(req,res)=>{
  const{current_password:c,new_password:n}=req.body||{};
  if(typeof c!=='string'||typeof n!=='string'||!c||!n)return res.status(400).json({error:'กรอกข้อมูลให้ครบ'});
@@ -102,7 +106,13 @@ app.get('/api/report',auth(...HR,'manager'),h(async(req,res)=>{
  const r={byDept:await q(`SELECT d.department_name name,COUNT(*) total FROM employees e JOIN departments d ON d.department_id=e.department_id ${W}d.department_name ORDER BY 1`),
   byPos:await q(`SELECT p.position_name name,COUNT(*) total FROM employees e JOIN positions p ON p.position_id=e.position_id ${W}p.position_name ORDER BY 1`),
   today:await q("SELECT report_type name,COUNT(*) total FROM reports WHERE report_type IN ('absent','leave','late','ot') AND created_date::date=CURRENT_DATE GROUP BY report_type")};
- if(req.query.save&&req.u.eid)await run("INSERT INTO reports(employee_id,report_type,data) VALUES(:e,'headcount',:d)",{e:req.u.eid,d:JSON.stringify(r)});res.json(r)}));
+ if(req.query.save&&req.u.eid)await run("INSERT INTO reports(employee_id,report_type,data) VALUES(:e,'headcount',:d)",{e:req.u.eid,d:JSON.stringify(r)});
+ const m=okMonth(req.query.month)?req.query.month:new Date().toISOString().slice(0,7),[s,e]=span(m);
+ r.month=m;
+ r.monthly=await q("SELECT e.employee_id,e.first_name||' '||e.last_name AS name,d.department_name AS dept,COUNT(*) FILTER(WHERE x.report_type='absent') AS absent,COUNT(*) FILTER(WHERE x.report_type='leave') AS leave,COUNT(*) FILTER(WHERE x.report_type='late') AS late,COALESCE(SUM(CASE WHEN x.report_type='ot' THEN x.data::numeric ELSE 0 END),0) AS ot_hours FROM employees e JOIN departments d ON d.department_id=e.department_id LEFT JOIN reports x ON x.employee_id=e.employee_id AND x.report_type IN ('absent','leave','late','ot') AND x.created_date::date BETWEEN CAST(:s AS date) AND CAST(:e AS date) WHERE e.employment_status='active' GROUP BY e.employee_id,e.first_name,e.last_name,d.department_name ORDER BY e.employee_id",{s,e});
+ r.daily=await q("SELECT x.created_date::date AS day,COUNT(*) FILTER(WHERE x.report_type='absent') AS absent,COUNT(*) FILTER(WHERE x.report_type='leave') AS leave,COUNT(*) FILTER(WHERE x.report_type='late') AS late,COALESCE(SUM(CASE WHEN x.report_type='ot' THEN x.data::numeric ELSE 0 END),0) AS ot_hours FROM reports x JOIN employees e ON e.employee_id=x.employee_id WHERE e.employment_status='active' AND x.report_type IN ('absent','leave','late','ot') AND x.created_date::date BETWEEN CAST(:s AS date) AND CAST(:e AS date) GROUP BY 1 ORDER BY 1",{s,e});
+ r.resigned=(await q("SELECT COUNT(*) AS n FROM resignations WHERE status<>'cancelled' AND effective_date BETWEEN CAST(:s AS date) AND CAST(:e AS date)",{s,e}))[0].n;
+ res.json(r)}));
 
 app.post('/api/backup',auth(...HR),h(async(_,res)=>{const d={};
  for(const t of['departments','positions','employees','resignations'])d[t]=await q('SELECT * FROM '+t);d.reports=await q("SELECT report_id,employee_id,report_type,created_date,data FROM reports WHERE report_type<>'photo'");
