@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Employee Management System (PostgreSQL + Node.js)
 
 1. ติดตั้ง Node.js 18+ และ PostgreSQL 14+ จากนั้นสร้าง user กับ database:
