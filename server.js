@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express=require('express'),{Pool,types}=require('pg'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken');
 types.setTypeParser(20,Number);types.setTypeParser(1700,Number);types.setTypeParser(1082,v=>v);
-const fs=require('fs'),path=require('path');
+const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const app=express(),S=process.env.JWT_SECRET||'change-me',HR=['hr','admin'],DEF='Passw0rd!',fails=new Map();
 app.use(express.json({limit:'1mb'}));app.use(express.static('public'));
 let pool;const getPool=()=>pool||(pool=new Pool({connectionString:process.env.DATABASE_URL,max:3}).on('error',e=>console.error('pg pool:',e.message)));
@@ -14,7 +14,7 @@ const h=f=>(req,res)=>f(req,res).catch(e=>{console.error(e);res.status(['23505',
 const auth=(...r)=>(req,res,next)=>{try{req.u=jwt.verify((req.headers.authorization||'').slice(7)||req.query.t,S)}catch{return res.status(401).json({error:'กรุณาเข้าสู่ระบบใหม่'})}
  if(r.length&&!r.includes(req.u.role))return res.status(403).json({error:'ไม่มีสิทธิ์เข้าถึงข้อมูลนี้'});next()};
 const okMonth=m=>/^\d{4}-(0[1-9]|1[0-2])$/.test(m||''),span=m=>{const[y,mo]=m.split('-').map(Number);return[m+'-01',m+'-'+P2(new Date(y,mo,0).getDate())]};
-const EMP=`SELECT e.employee_id,e.first_name,e.last_name,e.email,e.phone,e.address,e.hire_date,e.day_off,e.employment_status,e.department_id,e.position_id,d.department_name,p.position_name,e.manager_id,m.first_name||' '||m.last_name manager_name,a.role FROM employees e LEFT JOIN employees m ON m.employee_id=e.manager_id LEFT JOIN accounts a ON a.account_id=e.account_id JOIN departments d ON d.department_id=e.department_id JOIN positions p ON p.position_id=e.position_id`;
+const EMP=`SELECT e.employee_id,e.first_name,e.last_name,e.email,e.phone,e.address,e.hire_date,e.day_off,e.employment_status,e.department_id,e.position_id,d.department_name,p.position_name,e.manager_id,m.first_name||' '||m.last_name manager_name,a.role,a.status account_status FROM employees e LEFT JOIN employees m ON m.employee_id=e.manager_id LEFT JOIN accounts a ON a.account_id=e.account_id JOIN departments d ON d.department_id=e.department_id JOIN positions p ON p.position_id=e.position_id`;
 
 const CE=i=>'EMP'+String(i).padStart(3,'0'),TYN={absent:'ขาด',leave:'ลา',late:'มาสาย',ot:'OT'};
 const logAct=async(req,action,detail)=>{const u=req.u||{};if(!u.eid||!(HR.includes(u.role)||u.role==='manager'))return;
@@ -93,6 +93,25 @@ app.post('/api/employees/:id/resign',auth(...HR),h(async(req,res)=>{
  await run('UPDATE employees SET manager_id=NULL WHERE manager_id=:i',{i});
  await run("UPDATE accounts SET status='inactive' WHERE account_id=:a",{a:e.account_id});
  await logAct(req,'edit',`บันทึกลาออก/พ้นสภาพ: รหัส ${CE(i)} (${await nameOf(i)})`);res.json({ok:1})}));
+// HR รีเซ็ตรหัสผ่าน/ปลดล็อกบัญชีให้พนักงาน (กรณีลืมรหัสผ่านจนบัญชีถูกล็อก)
+const tmpPw=()=>{const U='ABCDEFGHJKLMNPQRSTUVWXYZ',L='abcdefghijkmnopqrstuvwxyz',N='23456789',A=U+L+N,pk=s=>s[crypto.randomInt(s.length)],c=[pk(U),pk(L),pk(N),...Array.from({length:7},()=>pk(A))];
+ for(let i=c.length-1;i>0;i--){const j=crypto.randomInt(i+1);[c[i],c[j]]=[c[j],c[i]]}return c.join('')};
+app.post('/api/employees/:id/reset-password',auth(...HR),h(async(req,res)=>{
+ const id=+req.params.id,given=req.body&&req.body.new_password,[t]=await q('SELECT e.first_name,e.last_name,e.employment_status,a.account_id,a.role,a.status FROM employees e LEFT JOIN accounts a ON a.account_id=e.account_id WHERE e.employee_id=:i',{i:id});
+ if(!t)return res.status(404).json({error:'ไม่พบพนักงาน'});
+ if(!t.account_id)return res.status(400).json({error:'พนักงานคนนี้ไม่มีบัญชีเข้าสู่ระบบ'});
+ if(t.status==='inactive'||t.employment_status==='resigned')return res.status(400).json({error:'บัญชีของพนักงานที่ลาออก/พ้นสภาพ ไม่สามารถรีเซ็ตรหัสผ่านได้'});
+ if(t.role==='admin'&&req.u.role!=='admin')return res.status(403).json({error:'ไม่มีสิทธิ์รีเซ็ตรหัสผ่านของผู้ดูแลระบบ'});
+ if(given!=null&&(typeof given!=='string'||given.length<8||Buffer.byteLength(given)>72))return res.status(400).json({error:'รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร และไม่ยาวเกินไป'});
+ const pw=given||tmpPw(),hash=await bcrypt.hash(pw,10),c=await getPool().connect(),x1=(s,p)=>{const[q1,v]=sql(s,p);return c.query(q1,v)};
+ try{await c.query('BEGIN');
+  await x1("UPDATE accounts SET password=:p,status='active' WHERE account_id=:a",{p:hash,a:t.account_id});
+  await x1("INSERT INTO reports(employee_id,report_type,created_date,data) VALUES(:e,'pwd_reset',now() AT TIME ZONE 'Asia/Bangkok',:d)",{e:id,d:JSON.stringify({by:req.u.name||req.u.un||'-',locked:t.status==='locked',method:given?'manual':'random'})});
+  await c.query('COMMIT')}catch(x){await c.query('ROLLBACK');throw x}finally{c.release()}
+ fails.delete(t.account_id);
+ await logAct(req,'edit',`รีเซ็ตรหัสผ่าน${t.status==='locked'?'และปลดล็อกบัญชี':''}: รหัส ${CE(id)} (${t.first_name} ${t.last_name})`);
+ res.json(given?{ok:1}:{ok:1,temp_password:pw})}));
+app.get('/api/password-resets',auth(...HR),h(async(req,res)=>res.json((await q("SELECT r.report_id reset_id,substr(r.created_date::text,1,19) reset_at,r.employee_id,e.first_name||' '||e.last_name emp,r.data FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_type='pwd_reset'"+(req.query.employee_id?' AND r.employee_id=:i':'')+" ORDER BY r.report_id DESC LIMIT 300",req.query.employee_id?{i:+req.query.employee_id||0}:{})).map(({data,...o})=>{let j={};try{j=JSON.parse(data)}catch{}return{...o,reset_by_name:j.by||'-',was_locked:!!j.locked,method:j.method||'random'}}))));
 app.get('/api/resignations',auth(...HR),h(async(_,res)=>res.json(await q("SELECT r.resignation_id,e.first_name||' '||e.last_name emp,r.reason,r.request_date,r.effective_date,r.status FROM resignations r JOIN employees e ON e.employee_id=r.employee_id ORDER BY 1 DESC"))));
 
 const reqs=async()=>{const dn=Object.fromEntries((await q('SELECT department_id,department_name FROM departments')).map(x=>[x.department_id,x.department_name])),pn=Object.fromEntries((await q('SELECT position_id,position_name FROM positions')).map(x=>[x.position_id,x.position_name]));
