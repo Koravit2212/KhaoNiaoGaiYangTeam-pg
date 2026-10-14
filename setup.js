@@ -8,7 +8,7 @@ const{Client}=require('pg'),bcrypt=require('bcryptjs'),fs=require('fs');
   const pw=await bcrypt.hash('Passw0rd!',10);
   await c.query('BEGIN');
   for(const d of['ฝ่ายทรัพยากรบุคคล','ฝ่ายไอที','ฝ่ายบัญชี'])await c.query('INSERT INTO departments(department_name) VALUES($1)',[d]);
-  for(const[p,s]of[['HR Officer',28000],['Manager',65000],['Developer',45000],['Accountant',32000]])await c.query('INSERT INTO positions(position_name,salary_rate) VALUES($1,$2)',[p,s]);
+  for(const[p,s,d]of[['HR Officer',28000,1],['Manager',65000,null],['Developer',45000,2],['Accountant',32000,3]])await c.query('INSERT INTO positions(position_name,salary_rate,department_id) VALUES($1,$2,$3)',[p,s,d]);
   const U=[['somchai.j@nexus.co.th','hr','สมชาย','จันทร์เพ็ญ',1,1],['manager@nexus.co.th','manager','วิภา','สุขสันต์',1,2],['dev@nexus.co.th','employee','นภัส','ใจดี',2,3]];
   for(const[u,r,f,l,d,p]of U){
    const a=await c.query('INSERT INTO accounts(username,password,role) VALUES($1,$2,$3) RETURNING account_id',[u,pw,r]);
