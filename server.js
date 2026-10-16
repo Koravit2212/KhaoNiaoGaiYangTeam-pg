@@ -140,12 +140,19 @@ app.post('/api/requests/:id/decide',auth('manager'),h(async(req,res)=>{
 const TYP=['absent','leave','late','ot'],ATQ="SELECT r.report_id record_id,r.created_date::date work_date,r.report_type record_type,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_type IN ('absent','leave','late','ot')";
 app.get('/api/attendance',auth(...HR),h(async(req,res)=>res.json((await q(ATQ+" AND r.created_date::date=CAST(:d AS date) ORDER BY r.report_id DESC",{d:req.query.date})).map(att))));
 const DT=/^\d{4}-\d{2}-\d{2}$/,okHrs=h=>h>0&&h<=24;
+// วันลาคงเหลือ (employees.day_off): บันทึก "ลา" ตัด 1 วัน ลบ/แก้เป็นประเภทอื่นคืน 1 วัน ทำใน transaction เดียวกับรายการ
+const NOLV=new Error('no-leave-left'),NOLV_MSG={error:'พนักงานไม่มีวันลาคงเหลือ กรุณาบันทึกเป็น "ขาด" หรือเพิ่มวันลาคงเหลือในข้อมูลพนักงานก่อน'};
+const tx=async fn=>{const c=await getPool().connect(),x=(t,p)=>{const[q1,v]=sql(t,p);return c.query(q1,v)};
+ try{await c.query('BEGIN');const o=await fn(x);await c.query('COMMIT');return o}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}};
+const leaveAdj=async(x,eid,d)=>{const r=await x(d<0?'UPDATE employees SET day_off=day_off-1 WHERE employee_id=:e AND day_off>=1 RETURNING day_off':'UPDATE employees SET day_off=day_off+1 WHERE employee_id=:e RETURNING day_off',{e:eid});return r.rows[0]?+r.rows[0].day_off:null};
 app.post('/api/attendance',auth(...HR),h(async(req,res)=>{const b=req.body;if(!TYP.includes(b.record_type))return res.status(400).json({error:'ประเภทไม่ถูกต้อง'});
  if(!DT.test(b.work_date||''))return res.status(400).json({error:'เลือกวันที่ให้ถูกต้อง'});
  if(b.record_type==='ot'&&!okHrs(+b.ot_hours))return res.status(400).json({error:'จำนวนชั่วโมง OT ต้องมากกว่า 0 และไม่เกิน 24'});
- await run("INSERT INTO reports(employee_id,report_type,created_date,data) VALUES(:e,:t,CAST(:d AS timestamp),:h)",{e:b.employee_id,t:b.record_type,d:b.work_date,h:String(b.record_type==='ot'?+b.ot_hours:0)});
- await logAct(req,'add',`บันทึก${TYN[b.record_type]}: ${await nameOf(b.employee_id)} (${b.work_date}${b.record_type==='ot'?', '+(+b.ot_hours)+' ชม.':''})`);res.json({ok:1})}));
-const ATONE="SELECT r.report_id,r.report_type,r.created_date::date work_date,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_id=:i AND r.report_type IN ('absent','leave','late','ot')";
+ const isL=b.record_type==='leave';let left=null;
+ try{left=await tx(async x=>{let l=null;if(isL){l=await leaveAdj(x,b.employee_id,-1);if(l==null)throw NOLV}
+  await x("INSERT INTO reports(employee_id,report_type,created_date,data) VALUES(:e,:t,CAST(:d AS timestamp),:h)",{e:b.employee_id,t:b.record_type,d:b.work_date,h:String(b.record_type==='ot'?+b.ot_hours:0)});return l})}catch(e){if(e===NOLV)return res.status(400).json(NOLV_MSG);throw e}
+ await logAct(req,'add',`บันทึก${TYN[b.record_type]}: ${await nameOf(b.employee_id)} (${b.work_date}${b.record_type==='ot'?', '+(+b.ot_hours)+' ชม.':''}${isL?' · วันลาคงเหลือ '+left+' วัน':''})`);res.json({ok:1,day_off:left})}));
+const ATONE="SELECT r.report_id,r.employee_id,r.report_type,r.created_date::date work_date,r.data,e.first_name||' '||e.last_name emp FROM reports r JOIN employees e ON e.employee_id=r.employee_id WHERE r.report_id=:i AND r.report_type IN ('absent','leave','late','ot')";
 app.put('/api/attendance/:id',auth(...HR),h(async(req,res)=>{const b=req.body||{},id=+req.params.id,[r]=await q(ATONE,{i:id});
  if(!r)return res.status(404).json({error:'ไม่พบรายการ'});
  const t=b.record_type||r.report_type,d=b.work_date||r.work_date;
@@ -153,12 +160,14 @@ app.put('/api/attendance/:id',auth(...HR),h(async(req,res)=>{const b=req.body||{
  if((r.report_type==='ot')!==(t==='ot'))return res.status(400).json({error:'เปลี่ยนระหว่าง OT กับ ขาด/ลา/มาสาย ไม่ได้'});
  if(!DT.test(d))return res.status(400).json({error:'เลือกวันที่ให้ถูกต้อง'});
  const hrs=t==='ot'?+(b.ot_hours??r.data):0;if(t==='ot'&&!okHrs(hrs))return res.status(400).json({error:'จำนวนชั่วโมง OT ต้องมากกว่า 0 และไม่เกิน 24'});
- await run('UPDATE reports SET report_type=:t,created_date=CAST(:d AS timestamp),data=:h WHERE report_id=:i',{t,d,h:String(hrs),i:id});
- await logAct(req,'edit',`แก้ไขรายการ${TYN[t]}: ${r.emp} (${d}${t==='ot'?', '+hrs+' ชม.':''})`);res.json({ok:1})}));
+ const wasL=r.report_type==='leave',isL=t==='leave';let left=null;
+ try{left=await tx(async x=>{let l=null;if(wasL&&!isL)l=await leaveAdj(x,r.employee_id,1);else if(!wasL&&isL){l=await leaveAdj(x,r.employee_id,-1);if(l==null)throw NOLV}
+  await x('UPDATE reports SET report_type=:t,created_date=CAST(:d AS timestamp),data=:h WHERE report_id=:i',{t,d,h:String(hrs),i:id});return l})}catch(e){if(e===NOLV)return res.status(400).json(NOLV_MSG);throw e}
+ await logAct(req,'edit',`แก้ไขรายการ${TYN[t]}: ${r.emp} (${d}${t==='ot'?', '+hrs+' ชม.':''}${wasL!==isL&&left!=null?' · วันลาคงเหลือ '+left+' วัน':''})`);res.json({ok:1,day_off:left})}));
 app.delete('/api/attendance/:id',auth(...HR),h(async(req,res)=>{const id=+req.params.id,[r]=await q(ATONE,{i:id});
  if(!r)return res.status(404).json({error:'ไม่พบรายการ'});
- await run('DELETE FROM reports WHERE report_id=:i',{i:id});
- await logAct(req,'delete',`ลบรายการ${TYN[r.report_type]}: ${r.emp} (${r.work_date})`);res.json({ok:1})}));
+ const left=await tx(async x=>{const l=r.report_type==='leave'?await leaveAdj(x,r.employee_id,1):null;await x('DELETE FROM reports WHERE report_id=:i',{i:id});return l});
+ await logAct(req,'delete',`ลบรายการ${TYN[r.report_type]}: ${r.emp} (${r.work_date})${left!=null?' · คืนวันลา คงเหลือ '+left+' วัน':''}`);res.json({ok:1,day_off:left})}));
 app.get('/api/my/records',auth(),h(async(req,res)=>{if(!okMonth(req.query.month))return res.status(400).json({error:'เลือกเดือนก่อน'});const[s,e]=span(req.query.month);
  res.json((await q(ATQ+" AND r.employee_id=:i AND r.created_date::date BETWEEN CAST(:s AS date) AND CAST(:e AS date) ORDER BY 2",{i:req.u.eid||0,s,e})).map(att))}));
 

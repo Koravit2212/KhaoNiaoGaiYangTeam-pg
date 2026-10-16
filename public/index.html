@@ -284,7 +284,7 @@ const CH={absent:'#ff8080',leave:'#8fd673',late:'#ffb678',ot:'#55d6d6',ot_hours:
 async function vRep(mode){let m=new Date().toISOString().slice(0,7),r=await api('/report?'+(mode==='rep'?'save=1&':'')+'month='+m);
  const t=(a,h)=>`<div class="panel"><h3>${h}</h3><table>${a.map(x=>`<tr><td>${E(TY[x.name]||x.name)}<td>${x.total}</tr>`).join('')||'<tr><td>ไม่มีข้อมูล</tr>'}</table></div>`,
  draw=()=>{const mo=r.monthly,sm=k=>mo.reduce((s,x)=>s+(+x[k]||0),0),lbl=MN[+m.slice(5)-1]+' '+(+m.slice(0,4)+543),G='style="grid-template-columns:1fr 1fr"',
-  ctl=`<div class="panel noprint"><div class="row"><label>เดือน<input id="rm" type="month" value="${m}"></label>${mode==='rep'?'<button class="btn o" id="rc">ดาวน์โหลด CSV</button><button class="btn o" id="rp">พิมพ์รายงาน</button>':''}</div></div>`,
+  ctl=`<div class="panel noprint"><div class="row"><label>เดือน<input id="rmo" type="month" value="${m}"></label>${mode==='rep'?'<button class="btn o" id="rc">ดาวน์โหลด CSV</button><button class="btn o" id="rp">พิมพ์รายงาน</button>':''}</div></div>`,
   cards=`<h3>สรุปประจำเดือน ${lbl}</h3><div class="cards">${kc('leave',sm('leave'),'ลา (วัน)')}${kc('absent',sm('absent'),'ขาด (วัน)')}${kc('late',sm('late'),'มาสาย (ครั้ง)')}${kc('ot',sm('ot_hours'),'ชั่วโมง OT')}</div>`;
   $('#v').innerHTML=mode==='rep'?`<h2>รายงาน</h2>${ctl}${cards}
   <div class="g2" ${G}>${t(r.byDept,'จำนวนพนักงานตามแผนก (ปัจจุบัน)')}${t(r.byPos,'จำนวนพนักงานตามตำแหน่ง (ปัจจุบัน)')}</div>${t(r.today,'ขาด ลา มาสาย OT วันนี้')}
@@ -295,7 +295,7 @@ async function vRep(mode){let m=new Date().toISOString().slice(0,7),r=await api(
   <div class="panel"><h3>ลา ขาด มาสาย รายวัน (ครั้ง)</h3>${lgd(['leave','absent','late'])}${col(m,r.daily,['leave','absent','late'])}</div>
   <div class="g2" ${G}><div class="panel"><h3>ชั่วโมง OT รายวัน</h3>${col(m,r.daily,['ot_hours'])}</div>${t(r.today,'ลา ขาด มาสาย OT วันนี้')}</div>
   <div class="g2" ${G}><div class="panel"><h3>5 อันดับ ลา/ขาด/สายมากที่สุด</h3>${lgd(['leave','absent','late'])}${rank(mo,['leave','absent','late'])}</div><div class="panel"><h3>5 อันดับ OT มากที่สุด (ชม.)</h3>${rank(mo,['ot_hours'])}</div></div>`;
-  $('#rm').onchange=async()=>{if(!$('#rm').value)return;m=$('#rm').value;r=await api('/report?month='+m);draw()};
+  $('#rmo').onchange=async()=>{if(!$('#rmo').value)return;m=$('#rmo').value;r=await api('/report?month='+m);draw()};
   if($('#rp'))$('#rp').onclick=()=>print();
   if($('#rc'))$('#rc').onclick=()=>{const q=v=>'"'+String(v).replace(/"/g,'""')+'"',rows=[['รหัส','ชื่อ-นามสกุล','แผนก','ลา (วัน)','ขาด (วัน)','สาย (ครั้ง)','OT (ชม.)'],...mo.map(x=>[C(x.employee_id),x.name,x.dept,x.leave,x.absent,x.late,x.ot_hours])],a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+rows.map(x=>x.map(q).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));a.download='report-'+m+'.csv';a.click()}};draw()}
 async function vManual(){const r=await fetch('/api/manual',{headers:{Authorization:'Bearer '+T}});if(r.status===401)return out();
